@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>Fundraiser Ledger</title>
+<title>Syracuse Family</title>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
@@ -236,7 +236,7 @@ function App(){
   const totals = data.empty? null : buildTotals(data);
   const common={data,totals,err,loadAll,run,session,setSession};
 
-  if(data.empty || !totals) return <Shell><Header title="Fundraiser Ledger" sub="setup needed"/><ErrBanner err={err} onRetry={loadAll}/></Shell>;
+  if(data.empty || !totals) return <Shell><Header title="Syracuse Family" sub="setup needed"/><ErrBanner err={err} onRetry={loadAll}/></Shell>;
   if(session.role==="admin") return <AdminScreen {...common}/>;
   if(session.role==="cashier") return <CashierScreen {...common}/>;
   if(session.role==="member") return <MemberScreen {...common}/>;
@@ -278,7 +278,7 @@ function RolePicker(props){
   const [mode,setMode]=useState(null);
   const firstSetup=!data.settings?.admin_pin;
   return <Shell>
-    <Header title="Fundraiser Ledger" sub="cooked food sale · choose your role"/>
+    <Header title="Syracuse Family" sub="cooked food sale · choose your role"/>
     <ErrBanner err={err} onRetry={loadAll}/>
     <div className="main">
       {!mode&&<div>
