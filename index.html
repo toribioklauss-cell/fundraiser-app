@@ -362,7 +362,10 @@ function MemberScreen(props){
   const dishes=data.components.filter(c=>c.type!=="supply");
 
   const addExpense=async entry=>{
-    const ok=await run(()=>dbErr(sb.from("expenses").insert({member_id:session.memberId,descr:entry.desc,amount:entry.amount,component_id:entry.componentId==="general"?null:entry.componentId,exp_date:entry.date})),"Couldn't save expense");
+    const cid=entry.componentId==="general"?null:entry.componentId;
+    const rows=[{member_id:session.memberId,descr:entry.desc,amount:entry.amount,component_id:cid,exp_date:entry.date}];
+    if(entry.tax>0) rows.push({member_id:session.memberId,descr:`Tax — ${entry.desc}`,amount:entry.tax,component_id:cid,exp_date:entry.date});
+    const ok=await run(()=>dbErr(sb.from("expenses").insert(rows)),"Couldn't save expense");
     if(ok) setShowForm(false);
   };
   const toggleFlag=e=>run(()=>dbErr(sb.from("expenses").update({flagged:!e.flagged}).eq("id",e.id)),"Couldn't update");
@@ -406,15 +409,19 @@ function ExpenseItem({e,data,action,memberName}){
 function ExpenseModal({dishes,onClose,onSubmit,members,initial}){
   const [desc,setDesc]=useState(initial?.desc||""); const [amount,setAmount]=useState(initial?String(initial.amount):""); const [componentId,setComponentId]=useState(initial?(initial.componentId||"general"):"");
   const [memberId,setMemberId]=useState(initial?.memberId||members?.[0]?.id||""); const [date,setDate]=useState(initial?.date||todayStr());
+  const [tax,setTax]=useState("");
   const valid=desc.trim()&&N(amount)>0&&componentId&&(!members||memberId);
   return <Modal title={initial?"Edit expense":"Add expense"} color="var(--rust)" onClose={onClose}>
-    <form onSubmit={e=>{e.preventDefault(); if(valid) onSubmit({desc:desc.trim(),amount:N(amount),componentId,date,memberId});}}>
+    <form onSubmit={e=>{e.preventDefault(); if(valid) onSubmit({desc:desc.trim(),amount:N(amount),componentId,date,memberId,tax:N(tax)});}}>
       {members&&<div className="field"><label className="fLabel">For member</label>
         <div className="chips">{members.map(m=><button key={m.id} type="button" className={"chip"+(memberId===m.id?" active":"")} onClick={()=>setMemberId(m.id)}>{m.name}</button>)}</div></div>}
       <div className="field"><label className="fLabel">What was bought</label>
         <input className="input" value={desc} onChange={e=>setDesc(e.target.value)} placeholder="e.g. Pork belly" autoFocus/></div>
       <div className="field"><label className="fLabel">Amount</label>
         <div className="amountWrap"><span>$</span><input type="number" inputMode="decimal" step="0.01" min="0" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00"/></div></div>
+      {!initial&&<div className="field"><label className="fLabel">Tax / extra charges on the receipt (optional)</label>
+        <div className="amountWrap"><span>$</span><input type="number" inputMode="decimal" step="0.01" min="0" value={tax} onChange={e=>setTax(e.target.value)} placeholder="0.00"/></div>
+        <div style={{fontSize:11.5,color:"var(--faint)",marginTop:5}}>Saved as its own "Tax" line under the same dish.</div></div>}
       <div className="field"><label className="fLabel">For which dish?</label>
         <div className="chips">{dishes.map(d=><button key={d.id} type="button" className={"chip"+(componentId===d.id?" active":"")} onClick={()=>setComponentId(d.id)}>{d.name}</button>)}
         <button type="button" className={"chip"+(componentId==="general"?" active":"")} onClick={()=>setComponentId("general")}>General / other</button></div></div>
@@ -462,6 +469,7 @@ function CashierScreen(props){
   const [ticket,setTicket]=useState([]);
   const [drinkPickFor,setDrinkPickFor]=useState(null);
   const [showZelle,setShowZelle]=useState(false);
+  const [zelleConfirmed,setZelleConfirmed]=useState(false);
   const [doneFlash,setDoneFlash]=useState(false);
 
   const drinks=data.components.filter(c=>c.type==="drink");
@@ -552,11 +560,19 @@ function CashierScreen(props){
         return <button key={d.id} className="chip" style={{fontSize:16,padding:"14px 20px",opacity:out?.4:1}} disabled={out}
           onClick={()=>addLine(drinkPickFor,d.id)}>{d.name}{out?" (out)":""}</button>;})}</div>
     </Modal>}
-    {showZelle&&<Modal title="Zelle payment" color="var(--purple)" onClose={()=>setShowZelle(false)}>
+    {showZelle&&<Modal title="Zelle payment" color="var(--purple)" onClose={()=>{setShowZelle(false);setZelleConfirmed(false);}}>
+      <div style={{textAlign:"center",margin:"4px 0 12px"}}>
+        <div style={{fontSize:13,color:"#5B5546"}}>Please send exactly</div>
+        <div className="mono" style={{fontSize:34,fontWeight:700}}>${fmt(total)}</div>
+      </div>
       {data.settings.zelle_qr?<img className="qrImg" src={data.settings.zelle_qr} alt="Zelle QR"/>:
         <div className="empty">No Zelle QR uploaded — admin adds it in Settings.</div>}
-      <div className="rRow" style={{marginTop:10}}><span className="rLabel">Amount due</span><span className="rNum" style={{fontSize:22}}>${fmt(total)}</span></div>
-      <button className="submit" style={{background:"var(--sage)",marginTop:12}} onClick={()=>complete("zelle")}>Payment received — done</button>
+      <label style={{display:"flex",alignItems:"center",gap:10,marginTop:14,fontSize:14,fontWeight:600,cursor:"pointer"}}>
+        <input type="checkbox" style={{width:20,height:20}} checked={zelleConfirmed} onChange={e=>setZelleConfirmed(e.target.checked)}/>
+        I saw the Zelle notification arrive for ${fmt(total)}
+      </label>
+      <button className="submit" style={{background:"var(--sage)",marginTop:12,opacity:zelleConfirmed?1:.5}} disabled={!zelleConfirmed}
+        onClick={()=>{setZelleConfirmed(false);complete("zelle");}}>Payment received — done</button>
     </Modal>}
   </Shell>;
 }
@@ -650,8 +666,10 @@ function AdminExpenses(props){
   const [editExp,setEditExp]=useState(null);
   const dishes=data.components.filter(c=>c.type!=="supply");
   const addForMember=async entry=>{
-    const ok=await run(()=>dbErr(sb.from("expenses").insert({member_id:entry.memberId,descr:entry.desc,amount:entry.amount,
-      component_id:entry.componentId==="general"?null:entry.componentId,exp_date:entry.date,by_admin:true})),"Couldn't save expense");
+    const cid=entry.componentId==="general"?null:entry.componentId;
+    const rows=[{member_id:entry.memberId,descr:entry.desc,amount:entry.amount,component_id:cid,exp_date:entry.date,by_admin:true}];
+    if(entry.tax>0) rows.push({member_id:entry.memberId,descr:`Tax — ${entry.desc}`,amount:entry.tax,component_id:cid,exp_date:entry.date,by_admin:true});
+    const ok=await run(()=>dbErr(sb.from("expenses").insert(rows)),"Couldn't save expense");
     if(ok) setShowForm(false);
   };
   const updateExpense=async entry=>{
