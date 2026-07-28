@@ -138,8 +138,8 @@ input:focus{outline:2px solid var(--gold);outline-offset:1px}
    STEP 1 — PASTE YOUR SUPABASE VALUES HERE
    (Supabase Dashboard → Project Settings → API)
 ============================================================ */
-const SUPABASE_URL = "https://ivituapwkzusopdtoqnq.supabase.co";      // e.g. https://abcdxyz.supabase.co
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml2aXR1YXB3a3p1c29wZHRvcW5xIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNTQ4OTEsImV4cCI6MjEwMDgzMDg5MX0.lVGtRM1pei_cFxy4l1Buqq6RcmrrE7w-PB8ZCXw371g";    // the long "anon public" key
+const SUPABASE_URL = "https://ivituapwkzusopdtoqnq.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml2aXR1YXB3a3p1c29wZHRvcW5xIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNTQ4OTEsImV4cCI6MjEwMDgzMDg5MX0.lVGtRM1pei_cFxy4l1Buqq6RcmrrE7w-PB8ZCXw371g";
 /* ============================================================ */
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -403,11 +403,11 @@ function ExpenseItem({e,data,action,memberName}){
     <div className="iRight"><span className="iAmt" style={{color:"var(--rust)"}}>${fmt(e.amount)}</span>{action}</div>
   </div>;
 }
-function ExpenseModal({dishes,onClose,onSubmit,members}){
-  const [desc,setDesc]=useState(""); const [amount,setAmount]=useState(""); const [componentId,setComponentId]=useState("");
-  const [memberId,setMemberId]=useState(members?.[0]?.id||""); const [date,setDate]=useState(todayStr());
+function ExpenseModal({dishes,onClose,onSubmit,members,initial}){
+  const [desc,setDesc]=useState(initial?.desc||""); const [amount,setAmount]=useState(initial?String(initial.amount):""); const [componentId,setComponentId]=useState(initial?(initial.componentId||"general"):"");
+  const [memberId,setMemberId]=useState(initial?.memberId||members?.[0]?.id||""); const [date,setDate]=useState(initial?.date||todayStr());
   const valid=desc.trim()&&N(amount)>0&&componentId&&(!members||memberId);
-  return <Modal title="Add expense" color="var(--rust)" onClose={onClose}>
+  return <Modal title={initial?"Edit expense":"Add expense"} color="var(--rust)" onClose={onClose}>
     <form onSubmit={e=>{e.preventDefault(); if(valid) onSubmit({desc:desc.trim(),amount:N(amount),componentId,date,memberId});}}>
       {members&&<div className="field"><label className="fLabel">For member</label>
         <div className="chips">{members.map(m=><button key={m.id} type="button" className={"chip"+(memberId===m.id?" active":"")} onClick={()=>setMemberId(m.id)}>{m.name}</button>)}</div></div>}
@@ -647,11 +647,17 @@ function AdminDash(props){
 function AdminExpenses(props){
   const {data,run}=props;
   const [showForm,setShowForm]=useState(false);
+  const [editExp,setEditExp]=useState(null);
   const dishes=data.components.filter(c=>c.type!=="supply");
   const addForMember=async entry=>{
     const ok=await run(()=>dbErr(sb.from("expenses").insert({member_id:entry.memberId,descr:entry.desc,amount:entry.amount,
       component_id:entry.componentId==="general"?null:entry.componentId,exp_date:entry.date,by_admin:true})),"Couldn't save expense");
     if(ok) setShowForm(false);
+  };
+  const updateExpense=async entry=>{
+    const ok=await run(()=>dbErr(sb.from("expenses").update({member_id:entry.memberId,descr:entry.desc,amount:entry.amount,
+      component_id:entry.componentId==="general"?null:entry.componentId,exp_date:entry.date}).eq("id",editExp.id)),"Couldn't update expense");
+    if(ok) setEditExp(null);
   };
   const remove=e=>run(()=>dbErr(sb.from("expenses").delete().eq("id",e.id)),"Couldn't delete");
   return <div>
@@ -661,8 +667,11 @@ function AdminExpenses(props){
     {data.expenses.length===0?<div className="empty">No expenses logged yet.</div>:
       data.expenses.map(e=>{const m=data.members.find(x=>x.id===e.memberId);
         return <ExpenseItem key={e.id} e={e} data={data} memberName={m?.name}
-          action={<button className="iconBtn" title="Delete permanently" onClick={()=>remove(e)}>🗑️</button>}/>;})}
+          action={<span style={{display:"flex",gap:6,alignItems:"center"}}>
+            <button className="smallBtn" onClick={()=>setEditExp(e)}>Edit</button>
+            <button className="iconBtn" title="Delete permanently" onClick={()=>remove(e)}>🗑️</button></span>}/>;})}
     {showForm&&<ExpenseModal dishes={dishes} members={data.members} onClose={()=>setShowForm(false)} onSubmit={addForMember}/>}
+    {editExp&&<ExpenseModal dishes={dishes} members={data.members} initial={editExp} onClose={()=>setEditExp(null)} onSubmit={updateExpense}/>}
   </div>;
 }
 
