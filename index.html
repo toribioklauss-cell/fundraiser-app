@@ -179,7 +179,7 @@ async function fetchAll(){
     settings: st.data,
     members: me.data||[],
     components: (co.data||[]).map(c=>({id:c.id,name:c.name,type:c.type,tracked:c.tracked,perTogo:c.per_togo})),
-    menuItems: (mi.data||[]).map(m=>({id:m.id,name:m.name,category:m.category,price:N(m.price),photo:m.photo,includesDrink:m.includes_drink,recipe:m.recipe||[],planServings:N(m.plan_servings)})),
+    menuItems: (mi.data||[]).map(m=>({id:m.id,name:m.name,category:m.category,price:N(m.price),photo:m.photo,includesDrink:m.includes_drink,recipe:m.recipe||[],planServings:N(m.plan_servings),containerId:m.container_id||null})),
     expenses: (ex.data||[]).map(e=>({id:e.id,memberId:e.member_id,desc:e.descr,amount:N(e.amount),componentId:e.component_id,date:e.exp_date,flagged:e.flagged,byAdmin:e.by_admin})),
     orders: (or_.data||[]).map(o=>({id:o.id,time:o.order_time,type:o.order_type,payment:o.payment,total:N(o.total),items:o.items||[],usage:o.usage||{},flagged:o.flagged})),
     inv,
@@ -460,20 +460,18 @@ function LiveView({data,totals,onRefresh}){
 function CashierScreen(props){
   const {data,err,loadAll,run,setSession}=props;
   const [ticket,setTicket]=useState([]);
-  const [orderType,setOrderType]=useState("togo");
   const [drinkPickFor,setDrinkPickFor]=useState(null);
   const [showZelle,setShowZelle]=useState(false);
   const [doneFlash,setDoneFlash]=useState(false);
 
   const drinks=data.components.filter(c=>c.type==="drink");
-  const containers=data.components.filter(c=>c.type==="supply"&&c.perTogo);
   const remaining=cid=>N(data.inv[cid]);
 
   const usage=()=>{ const u={}; const add=(id,n)=>{u[id]=(u[id]||0)+n;};
     ticket.forEach(li=>{ const mi=data.menuItems.find(m=>m.id===li.menuItemId);
       (mi?.recipe||[]).forEach(r=>add(r.componentId,r.qty*li.qty));
       if(li.drinkId) add(li.drinkId,li.qty);
-      if(orderType==="togo") containers.forEach(cn=>add(cn.id,li.qty)); });
+      if(mi?.containerId) add(mi.containerId,li.qty); });
     return u; };
 
   const availableQty=mi=>{ const u=usage(); let max=Infinity;
@@ -493,7 +491,7 @@ function CashierScreen(props){
     if(ticket.length===0) return;
     const u=usage();
     const ok=await run(async()=>{
-      await dbErr(sb.from("orders").insert({order_type:orderType,payment:pay,total,
+      await dbErr(sb.from("orders").insert({order_type:"togo",payment:pay,total,
         items:ticket.map(l=>{const mi=data.menuItems.find(m=>m.id===l.menuItemId);
           return {menuItemId:l.menuItemId,name:mi?.name,qty:l.qty,price:N(mi?.price),drinkId:l.drinkId||null};}),
         usage:u}));
@@ -525,10 +523,7 @@ function CashierScreen(props){
       </div>
       <div className="ticket">
         <div className="tickHead"><span style={{fontFamily:"'Fraunces',serif",fontWeight:700,fontSize:16}}>Order</span>
-          <div className="togo">
-            <button className={"togoBtn"+(orderType==="togo"?" active":"")} onClick={()=>setOrderType("togo")}>To-go</button>
-            <button className={"togoBtn"+(orderType==="instore"?" active":"")} onClick={()=>setOrderType("instore")}>In-store</button>
-          </div></div>
+          <span className="iSub">all to-go</span></div>
         <div className="tickLines">
           {ticket.length===0&&<div className="empty">Tap items to add them.</div>}
           {ticket.map(l=>{ const mi=data.menuItems.find(m=>m.id===l.menuItemId);
@@ -684,7 +679,7 @@ function AdminMenu(props){
   },"Couldn't save").then(ok=>ok&&setEditComp(null));
   const deleteComponent=id=>run(()=>dbErr(sb.from("components").delete().eq("id",id)),"Couldn't delete");
   const saveMenuItem=m=>run(async()=>{
-    const row={name:m.name,category:m.category,price:m.price,photo:m.photo,includes_drink:m.includesDrink,recipe:m.recipe};
+    const row={name:m.name,category:m.category,price:m.price,photo:m.photo,includes_drink:m.includesDrink,recipe:m.recipe,container_id:m.containerId};
     if(m.id) await dbErr(sb.from("menu_items").update(row).eq("id",m.id));
     else await dbErr(sb.from("menu_items").insert(row));
   },"Couldn't save").then(ok=>ok&&setEditItem(null));
@@ -696,7 +691,7 @@ function AdminMenu(props){
     <div className="note">Dishes are what members cook (expenses tag to these). Supplies can be untracked (tissue, skewers) or tracked (to-go containers).</div>
     {data.components.map(c=><div key={c.id} className="item">
       <div className="iMain"><div className="iTitle">{c.name}</div>
-        <div className="iSub">{typeLabel[c.type]}{c.type==="supply"?(c.tracked?" · tracked":" · not tracked"):""}{c.perTogo?" · 1 per to-go item":""}</div></div>
+        <div className="iSub">{typeLabel[c.type]}{c.type==="supply"?(c.tracked?" · tracked":" · not tracked"):""}</div></div>
       <div className="iRight"><button className="smallBtn" onClick={()=>setEditComp(c)}>Edit</button>
         <button className="iconBtn" onClick={()=>deleteComponent(c.id)}>🗑️</button></div></div>)}
 
@@ -725,11 +720,9 @@ function ComponentModal({comp,onClose,onSave}){
     <div className="field"><label className="fLabel">Type</label>
       <div className="chips">{[["dish","Dish (cooked)"],["drink","Drink"],["supply","Supply"]].map(([v,l])=>
         <button key={v} type="button" className={"chip"+(type===v?" active":"")} onClick={()=>setType(v)}>{l}</button>)}</div></div>
-    {type==="supply"&&<>
-      <Toggle label="Track inventory (count it)?" value={tracked} onChange={setTracked}/>
-      {tracked&&<Toggle label="Use 1 per to-go item (container)?" value={perTogo} onChange={setPerTogo}/>}</>}
+    {type==="supply"&&<Toggle label="Track inventory (count it)?" value={tracked} onChange={setTracked}/>}
     <button className="submit" style={{background:"var(--gold)",opacity:valid?1:.5}} disabled={!valid}
-      onClick={()=>onSave({id:comp?.id,name:name.trim(),type,tracked:type==="supply"?tracked:true,perTogo:type==="supply"&&tracked?perTogo:false})}>Save</button>
+      onClick={()=>onSave({id:comp?.id,name:name.trim(),type,tracked:type==="supply"?tracked:true,perTogo:false})}>Save</button>
   </Modal>;
 }
 function MenuItemModal({item,data,onClose,onSave}){
@@ -739,9 +732,11 @@ function MenuItemModal({item,data,onClose,onSave}){
   const [photo,setPhoto]=useState(item?.photo||null);
   const [includesDrink,setIncludesDrink]=useState(item?.includesDrink??false);
   const [recipe,setRecipe]=useState(item?.recipe||[]);
+  const [containerId,setContainerId]=useState(item?.containerId||null);
   const fileRef=useRef(null);
   const valid=name.trim()&&N(price)>=0;
   const comps=data.components.filter(c=>c.type==="dish");
+  const supplies=data.components.filter(c=>c.type==="supply"&&c.tracked);
   const qtyOf=cid=>recipe.find(x=>x.componentId===cid)?.qty||0;
   const setQty=(cid,q)=>setRecipe(r=>{const o=r.filter(x=>x.componentId!==cid);return q>0?[...o,{componentId:cid,qty:q}]:o;});
   const pickPhoto=async e=>{const f=e.target.files?.[0]; if(f){try{setPhoto(await compressImage(f));}catch(_){}}};
@@ -774,8 +769,14 @@ function MenuItemModal({item,data,onClose,onSave}){
             <span className="qtyNum">{qtyOf(c.id)}</span>
             <button type="button" className="qtyBtn" onClick={()=>setQty(c.id,qtyOf(c.id)+1)}>＋</button></div>
         </div>)}</div>}
+    <div className="field"><label className="fLabel">Container used per order (all orders are to-go)</label>
+      <div className="chips">
+        <button type="button" className={"chip"+(!containerId?" active":"")} onClick={()=>setContainerId(null)}>None</button>
+        {supplies.map(s=><button key={s.id} type="button" className={"chip"+(containerId===s.id?" active":"")}
+          onClick={()=>setContainerId(s.id)}>{s.name}</button>)}
+      </div></div>
     <button className="submit" style={{background:"var(--sage)",opacity:valid?1:.5}} disabled={!valid}
-      onClick={()=>onSave({id:item?.id,name:name.trim(),category,price:N(price),photo,includesDrink:category!=="drink"&&includesDrink,recipe})}>Save menu item</button>
+      onClick={()=>onSave({id:item?.id,name:name.trim(),category,price:N(price),photo,includesDrink:category!=="drink"&&includesDrink,recipe,containerId})}>Save menu item</button>
   </Modal>;
 }
 
