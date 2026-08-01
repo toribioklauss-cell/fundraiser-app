@@ -231,8 +231,8 @@ function App(){
   },[]);
   useEffect(()=>{ loadAll(); },[loadAll]);
   useEffect(()=>{
-    if(session.role!=="member") return;
-    const t=setInterval(loadAll, 30000);
+    if(!session.role) return;
+    const t=setInterval(loadAll, 15000);
     return ()=>clearInterval(t);
   },[session.role,loadAll]);
 
