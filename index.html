@@ -163,7 +163,7 @@ function compressImage(file, maxDim=340){
 
 /* ---------- data access ---------- */
 async function fetchAll(){
-  const [st, me, co, mi, ex, or_, iv] = await Promise.all([
+  const [st, me, co, mi, ex, or_, iv, po] = await Promise.all([
     sb.from("settings").select("*").eq("id",1).single(),
     sb.from("members").select("*").order("created_at"),
     sb.from("components").select("*").order("created_at"),
@@ -171,8 +171,9 @@ async function fetchAll(){
     sb.from("expenses").select("*").order("created_at",{ascending:false}),
     sb.from("orders").select("*").order("order_time",{ascending:false}),
     sb.from("inventory").select("*"),
+    sb.from("preorders").select("*").order("created_at",{ascending:false}),
   ]);
-  const firstErr = [st,me,co,mi,ex,or_,iv].find(r=>r.error);
+  const firstErr = [st,me,co,mi,ex,or_,iv,po].find(r=>r.error);
   if(firstErr) throw new Error(firstErr.error.message);
   const inv={}; (iv.data||[]).forEach(r=>{ inv[r.component_id]=N(r.count); });
   return {
@@ -182,6 +183,7 @@ async function fetchAll(){
     menuItems: (mi.data||[]).map(m=>({id:m.id,name:m.name,category:m.category,price:N(m.price),photo:m.photo,includesDrink:m.includes_drink,recipe:m.recipe||[],planServings:N(m.plan_servings),containerId:m.container_id||null})),
     expenses: (ex.data||[]).map(e=>({id:e.id,memberId:e.member_id,desc:e.descr,amount:N(e.amount),componentId:e.component_id,date:e.exp_date,flagged:e.flagged,byAdmin:e.by_admin})),
     orders: (or_.data||[]).map(o=>({id:o.id,time:o.order_time,type:o.order_type,payment:o.payment,total:N(o.total),items:o.items||[],usage:o.usage||{},flagged:o.flagged})),
+    preorders: (po.data||[]).map(p=>({id:p.id,name:p.customer_name,items:p.items||[],usage:p.usage||{},total:N(p.total),paid:p.paid,payment:p.payment,status:p.status,created:p.created_at})),
     inv,
   };
 }
@@ -196,15 +198,23 @@ function buildTotals(data){
   const expByMember={};
   validExp.forEach(e=>{ expByMember[e.memberId]=(expByMember[e.memberId]||0)+e.amount; });
   const validOrders=data.orders.filter(o=>!o.flagged);
-  const totalRevenue=validOrders.reduce((a,o)=>a+o.total,0);
-  const cashRevenue=validOrders.filter(o=>o.payment==="cash").reduce((a,o)=>a+o.total,0);
+  const paidPre=(data.preorders||[]).filter(p=>p.paid&&p.status!=="canceled");
+  const unpaidPre=(data.preorders||[]).filter(p=>!p.paid&&p.status==="pending");
+  const totalRevenue=validOrders.reduce((a,o)=>a+o.total,0)+paidPre.reduce((a,p)=>a+p.total,0);
+  const cashRevenue=validOrders.filter(o=>o.payment==="cash").reduce((a,o)=>a+o.total,0)
+    +paidPre.filter(p=>p.payment==="cash").reduce((a,p)=>a+p.total,0);
   const zelleRevenue=totalRevenue-cashRevenue;
   const soldByMenuItem={};
   validOrders.forEach(o=>(o.items||[]).forEach(li=>{
     if(!soldByMenuItem[li.menuItemId]) soldByMenuItem[li.menuItemId]={qty:0,revenue:0};
     soldByMenuItem[li.menuItemId].qty+=li.qty; soldByMenuItem[li.menuItemId].revenue+=li.qty*N(li.price);
   }));
-  return {validExp,totalExpenses,expByComponent,generalExp,expByMember,validOrders,totalRevenue,cashRevenue,zelleRevenue,soldByMenuItem,netIncome:totalRevenue-totalExpenses};
+  paidPre.forEach(p=>(p.items||[]).forEach(li=>{
+    if(!soldByMenuItem[li.menuItemId]) soldByMenuItem[li.menuItemId]={qty:0,revenue:0};
+    soldByMenuItem[li.menuItemId].qty+=li.qty; soldByMenuItem[li.menuItemId].revenue+=li.qty*N(li.price);
+  }));
+  return {validExp,totalExpenses,expByComponent,generalExp,expByMember,validOrders,totalRevenue,cashRevenue,zelleRevenue,soldByMenuItem,netIncome:totalRevenue-totalExpenses,
+    paidPre,unpaidPre,unpaidPreTotal:unpaidPre.reduce((a,p)=>a+p.total,0)};
 }
 
 /* ================================================================ */
@@ -471,6 +481,9 @@ function CashierScreen(props){
   const [showZelle,setShowZelle]=useState(false);
   const [zelleConfirmed,setZelleConfirmed]=useState(false);
   const [doneFlash,setDoneFlash]=useState(false);
+  const [view,setView]=useState("register"); // 'register' | 'preorders'
+  const [showPreForm,setShowPreForm]=useState(false);
+  const [payPre,setPayPre]=useState(null); // preorder being paid via zelle
 
   const drinks=data.components.filter(c=>c.type==="drink");
   const remaining=cid=>N(data.inv[cid]);
@@ -509,13 +522,42 @@ function CashierScreen(props){
     if(ok){ setTicket([]); setShowZelle(false); setDoneFlash(true); setTimeout(()=>setDoneFlash(false),1500); }
   };
 
+  const createPreorder=async ({name,payMethod})=>{
+    if(ticket.length===0) return false;
+    const u=usage();
+    const ok=await run(async()=>{
+      await dbErr(sb.from("preorders").insert({customer_name:name,total,
+        items:ticket.map(l=>{const mi=data.menuItems.find(m=>m.id===l.menuItemId);
+          return {menuItemId:l.menuItemId,name:mi?.name,qty:l.qty,price:N(mi?.price),drinkId:l.drinkId||null};}),
+        usage:u, paid:!!payMethod, payment:payMethod||null}));
+      const rows=Object.entries(u).map(([cid,n])=>({component_id:cid,count:N(data.inv[cid])-n}));
+      if(rows.length) await dbErr(sb.from("inventory").upsert(rows));
+    },"Couldn't save pre-order");
+    if(ok){ setTicket([]); setShowPreForm(false); setDoneFlash(true); setTimeout(()=>setDoneFlash(false),1500); }
+    return ok;
+  };
+  const markPrePaid=(p,method)=>run(()=>dbErr(sb.from("preorders").update({paid:true,payment:method}).eq("id",p.id)),"Couldn't update pre-order");
+  const releasePre=p=>run(()=>dbErr(sb.from("preorders").update({status:"released"}).eq("id",p.id)),"Couldn't release");
+  const cancelPre=p=>run(async()=>{
+    const rows=Object.entries(p.usage||{}).map(([cid,n])=>({component_id:cid,count:N(data.inv[cid])+n}));
+    await dbErr(sb.from("preorders").update({status:"canceled"}).eq("id",p.id));
+    if(rows.length) await dbErr(sb.from("inventory").upsert(rows));
+  },"Couldn't cancel");
+
   const cats=[["meal","Meals"],["alacarte","À la carte"],["drink","Drinks"]];
   return <Shell wide>
     <Header icon="🛒" title="Cashier" sub="tap items · take payment" right={<span style={{display:"flex",gap:8}}>
       <button className="smallBtn" onClick={loadAll}>🔄 Sync</button>
       <button className="smallBtn" onClick={()=>setSession({role:null,memberId:null})}>Exit</button></span>}/>
     <ErrBanner err={err} onRetry={loadAll}/>
-    <div className="cashier">
+    <div style={{display:"flex",gap:8,padding:"12px 16px 0"}}>
+      <button className={"chip"+(view==="register"?" active":"")} onClick={()=>setView("register")}>🛒 Register</button>
+      <button className={"chip"+(view==="preorders"?" active":"")} onClick={()=>setView("preorders")}>
+        📋 Pre-orders{data.preorders.filter(p=>p.status==="pending").length>0?` (${data.preorders.filter(p=>p.status==="pending").length})`:""}
+      </button>
+    </div>
+    {view==="preorders"&&<PreordersView data={data} markPrePaid={markPrePaid} releasePre={releasePre} cancelPre={cancelPre} setPayPre={setPayPre}/>}
+    {view==="register"&&<div className="cashier">
       <div className="cMenu">
         {cats.map(([key,label])=>{ const list=data.menuItems.filter(m=>m.category===key);
           if(!list.length) return null;
@@ -550,11 +592,13 @@ function CashierScreen(props){
             <button className="payBtn" style={{background:"var(--sage)"}} onClick={()=>complete("cash")}>Cash received</button>
             <button className="payBtn" style={{background:"var(--purple)"}} onClick={()=>setShowZelle(true)}>Zelle QR</button>
           </div>}
+          {ticket.length>0&&<button className="payBtn" style={{background:"var(--gold)",width:"100%",marginTop:8}}
+            onClick={()=>setShowPreForm(true)}>📋 Save as pre-order</button>}
           {ticket.length>0&&<button className="clearBtn" onClick={()=>setTicket([])}>Clear order</button>}
           {doneFlash&&<div className="done">✔️ Order saved!</div>}
         </div>
       </div>
-    </div>
+    </div>}
     {drinkPickFor&&<Modal title={`Drink for ${drinkPickFor.name}`} color="var(--sage)" onClose={()=>setDrinkPickFor(null)}>
       <div className="chips">{drinks.map(d=>{ const out=remaining(d.id)-(usage()[d.id]||0)<=0;
         return <button key={d.id} className="chip" style={{fontSize:16,padding:"14px 20px",opacity:out?.4:1}} disabled={out}
@@ -574,7 +618,80 @@ function CashierScreen(props){
       <button className="submit" style={{background:"var(--sage)",marginTop:12,opacity:zelleConfirmed?1:.5}} disabled={!zelleConfirmed}
         onClick={()=>{setZelleConfirmed(false);complete("zelle");}}>Payment received — done</button>
     </Modal>}
+    {showPreForm&&<PreorderFormModal total={total} onClose={()=>setShowPreForm(false)} onSave={createPreorder} zelleQr={data.settings.zelle_qr}/>}
+    {payPre&&<Modal title={`Zelle — ${payPre.name}`} color="var(--purple)" onClose={()=>setPayPre(null)}>
+      <div style={{textAlign:"center",margin:"4px 0 12px"}}>
+        <div style={{fontSize:13,color:"#5B5546"}}>Please send exactly</div>
+        <div className="mono" style={{fontSize:34,fontWeight:700}}>${fmt(payPre.total)}</div>
+      </div>
+      {data.settings.zelle_qr?<img className="qrImg" src={data.settings.zelle_qr} alt="Zelle QR"/>:
+        <div className="empty">No Zelle QR uploaded — admin adds it in Settings.</div>}
+      <button className="submit" style={{background:"var(--sage)",marginTop:12}}
+        onClick={async()=>{await markPrePaid(payPre,"zelle");setPayPre(null);}}>Payment received — mark paid</button>
+    </Modal>}
   </Shell>;
+}
+
+function PreorderFormModal({total,onClose,onSave,zelleQr}){
+  const [name,setName]=useState("");
+  const [payMethod,setPayMethod]=useState(null); // null=not paid, 'cash', 'zelle'
+  const [showQr,setShowQr]=useState(false);
+  const valid=name.trim();
+  return <Modal title="Save as pre-order" color="var(--gold)" onClose={onClose}>
+    <div className="rRow" style={{marginBottom:10}}><span className="rLabel">Order total</span><span className="rNum" style={{fontSize:20}}>${fmt(total)}</span></div>
+    <div className="field"><label className="fLabel">Customer name</label>
+      <input className="input" value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Maria S." autoFocus/></div>
+    <div className="field"><label className="fLabel">Payment</label>
+      <div className="chips">
+        <button type="button" className={"chip"+(payMethod===null?" active":"")} onClick={()=>{setPayMethod(null);setShowQr(false);}}>Not yet paid</button>
+        <button type="button" className={"chip"+(payMethod==="cash"?" active":"")} onClick={()=>{setPayMethod("cash");setShowQr(false);}}>Paid — cash</button>
+        <button type="button" className={"chip"+(payMethod==="zelle"?" active":"")} onClick={()=>{setPayMethod("zelle");setShowQr(true);}}>Paid — Zelle</button>
+      </div></div>
+    {showQr&&zelleQr&&<img className="qrImg" src={zelleQr} alt="Zelle QR" style={{marginBottom:12}}/>}
+    <button className="submit" style={{background:"var(--gold)",opacity:valid?1:.5}} disabled={!valid}
+      onClick={()=>onSave({name:name.trim(),payMethod})}>
+      {payMethod?"Save pre-order (paid)":"Save pre-order (unpaid)"}
+    </button>
+    <div style={{fontSize:11.5,color:"var(--faint)",marginTop:8,lineHeight:1.5}}>
+      Saving reserves the food — inventory counts down now. Cancel later returns it for sale.
+    </div>
+  </Modal>;
+}
+
+function PreordersView({data,markPrePaid,releasePre,cancelPre,setPayPre}){
+  const pending=data.preorders.filter(p=>p.status==="pending");
+  const doneList=data.preorders.filter(p=>p.status!=="pending");
+  const Badge=({p})=>p.paid?
+    <span style={{fontSize:11,fontWeight:700,color:"var(--sage)",background:"#E8F0EA",padding:"3px 8px",borderRadius:10}}>PAID{p.payment?` · ${p.payment}`:""}</span>:
+    <span style={{fontSize:11,fontWeight:700,color:"var(--rust)",background:"#FBEAE3",padding:"3px 8px",borderRadius:10}}>NOT PAID</span>;
+  const Items=({p})=><div className="iSub">{(p.items||[]).map(i=>`${i.qty}× ${i.name}`).join(", ")}</div>;
+  return <div style={{padding:"14px 16px 96px",maxWidth:720,margin:"0 auto",width:"100%"}}>
+    <div className="secLabel">Waiting for pickup ({pending.length})</div>
+    {pending.length===0&&<div className="empty">No pending pre-orders. Build an order on the Register and tap "Save as pre-order".</div>}
+    {pending.map(p=><div key={p.id} className="item" style={{flexWrap:"wrap"}}>
+      <div className="iMain" style={{flex:"1 1 200px"}}>
+        <div className="iTitle">{p.name} <Badge p={p}/></div>
+        <Items p={p}/>
+      </div>
+      <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+        <span className="iAmt">${fmt(p.total)}</span>
+        {!p.paid&&<>
+          <button className="smallBtn" onClick={()=>markPrePaid(p,"cash")}>💵 Paid cash</button>
+          <button className="smallBtn" onClick={()=>setPayPre(p)}>Zelle QR</button>
+          <button className="smallBtn" style={{color:"var(--rust)"}} onClick={()=>{if(confirm(`Cancel ${p.name}'s pre-order? The food goes back on sale.`)) cancelPre(p);}}>Cancel</button>
+        </>}
+        {p.paid&&<button className="btn sage" onClick={()=>releasePre(p)}>✔️ Release</button>}
+      </div>
+    </div>)}
+    {doneList.length>0&&<>
+      <div className="secLabel">Released / canceled</div>
+      {doneList.map(p=><div key={p.id} className="item" style={{opacity:.65}}>
+        <div className="iMain"><div className="iTitle">{p.name} <Badge p={p}/></div><Items p={p}/></div>
+        <div className="iRight"><span className="iAmt">${fmt(p.total)}</span>
+          <span style={{fontSize:11,fontWeight:700,color:p.status==="released"?"var(--sage)":"var(--faint)"}}>{p.status==="released"?"RELEASED":"CANCELED"}</span></div>
+      </div>)}
+    </>}
+  </div>;
 }
 
 /* ---------------- ADMIN ---------------- */
@@ -633,6 +750,9 @@ function AdminDash(props){
     const oRows=[["Time","Type","Payment","Items","Total","Status"]];
     data.orders.forEach(o=>oRows.push([o.time,o.type,o.payment,(o.items||[]).map(i=>`${i.qty}x ${i.name}`).join(", "),o.total,o.flagged?"Error":"Valid"]));
     XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(oRows),"Sales");
+    const pRows=[["Customer","Items","Total","Paid","Payment","Status"]];
+    data.preorders.forEach(p=>pRows.push([p.name,(p.items||[]).map(i=>`${i.qty}x ${i.name}`).join(", "),p.total,p.paid?"Yes":"No",p.payment||"",p.status]));
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(pRows),"Pre-orders");
     XLSX.writeFile(wb,`fundraiser-${todayStr()}.xlsx`);
   };
 
@@ -640,6 +760,8 @@ function AdminDash(props){
     <div className="receipt">
       <div className="rRow"><span className="rLabel">Revenue ({totals.validOrders.length} orders)</span><span className="rNum" style={{color:"var(--sage)"}}>${fmt(totals.totalRevenue)}</span></div>
       <div className="rRow"><span className="rLabel">Cash / Zelle</span><span className="rNum">${fmt(totals.cashRevenue)} / ${fmt(totals.zelleRevenue)}</span></div>
+      {totals.unpaidPre.length>0&&<div className="rRow"><span className="rLabel">Unpaid pre-orders ({totals.unpaidPre.length})</span>
+        <span className="rNum" style={{color:"var(--gold)"}}>${fmt(totals.unpaidPreTotal)}</span></div>}
       <div className="rRow"><span className="rLabel">Expenses</span><span className="rNum" style={{color:"var(--rust)"}}>-${fmt(totals.totalExpenses)}</span></div>
       <div className="rDiv"/>
       <div className="rRow"><span className="rLabel big">Net income</span>
